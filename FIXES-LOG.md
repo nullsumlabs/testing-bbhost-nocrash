@@ -21,7 +21,9 @@ the crashes these target.
   `max(BB_GC_RECENT_FRAMES, BB_IMAGE_FREE_DELAY_FRAMES)` flips. Frames are the
   GPU's own timeline, so a long frame (a hitch, a load) can no longer age a
   texture out from under a submission still reading it - the
-  stalled-then-device-lost class of crash.
+  stalled-then-device-lost class of crash. The two counts share one floor (the
+  larger of the two), so setting either alone to 0 does not switch it off; set
+  both to 0 for bbhost's original behavior.
 - **Rationale:** bbhost already defers a deleted image's Vulkan objects to
   submission retirement (`defer_destroy_image`), so the "outlive unregistration"
   half is already covered; the frame floor adds the part it lacked - a texture
@@ -42,8 +44,9 @@ the crashes these target.
   - surfaces a shader or copy wrote are still never evicted (bbhost holds state
     the guest memory underneath does not), matching BloodBorneButPc keeping
     GPU-written blocks resident.
-- **Rationale:** the original default idle of 20 s (via `BBHOST_VRAM_EVICT_S`,
-  still honored, `=0` off) is kept as a fallback; the percentage line lets the
+- **Rationale:** `BBHOST_VRAM_EVICT_S` is still honored (`=0` off), but with
+  neither variable set the idle is now 30 s where bbhost's was 20 s -
+  `BBHOST_VRAM_EVICT_S=20` keeps the old default. The percentage line lets the
   sweep start before the reserve is hit and sweep harder as the card fills.
 
 ## Direct memory pool - launch crash on a large scene
@@ -52,7 +55,10 @@ the crashes these target.
   9152 MiB pool instead of 5056 MiB).
 - **Files:** `src/hle/kernel.cpp`.
 - **Change:** `BB_DMEM_MB` names the direct memory the game is told it has (the
-  stock 6 GiB otherwise), clamped to the window reserved for it (7.75 GiB).
+  stock 6 GiB otherwise), clamped to bbhost's own direct-memory window: 6 GiB
+  (the stock size) up to 7.75 GiB, the same range
+  `hle_kernel_set_dmem_size()` grows the pool in. A value at or below the stock
+  6 GiB is ignored rather than shrinking the pool the game's heaps live in.
 - **Rationale:** bbhost already grows the game's GFX heap and its direct memory
   for a scene above 1080p (`grow_gfx_heap` / `hle_kernel_set_dmem_size`,
   `engine/live_resolution.cpp`), so the >1080p policy is present; the switch
