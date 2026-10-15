@@ -127,10 +127,16 @@ cross-compiled from Linux with Clang and mingw-w64 (MSVC cannot express the
 calling conventions involved). Dependencies, the Windows build, tests and
 packaging are in [docs/building.md](docs/building.md).
 
+A Linux build can also be packed as an AppImage - one file to run, nothing to
+unpack or install: `tools/package_appimage.sh` packs a `package_linux.sh`
+tarball or a bbhost binary (`BB_APPIMAGE_BUILD=1` builds it first, `BB_MARCH`
+says what to compile for), and `tools/package_appimage_steamdeck.sh` is the
+same with the Steam Deck's settings.
+
 ## Documentation
 
 - [Running](docs/running.md) - configuration, controls, saves, troubleshooting, the debug menu
-- [Building](docs/building.md) - Linux, Windows, tests, packages
+- [Building](docs/building.md) - Linux, Windows, tests, packages, AppImages
 - [Rendering](docs/rendering.md) - how the graphics work, and what is native
 - [Decompilation](docs/decomp.md) - game functions rewritten as source
 - [Modding](docs/modding.md) - replacement files, params, patches

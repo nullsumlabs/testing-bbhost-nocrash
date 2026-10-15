@@ -83,8 +83,19 @@ every shader in the game's shader bundles.
 | `cmake --build build-win --target package-win` | `build/win/bbhost-win-<rev>.zip`, and the unstripped `.debug.exe` for symbolising crash reports |
 | `tools/package_linux.sh <bbhost> <outdir>` | a Linux tarball (built with `tools/linux_portable_build.sh` for a portable binary) |
 | `tools/package_steamdeck.sh` | the Linux package with the Steam Deck's settings |
+| `tools/package_appimage.sh [INPUT] [OUTDIR]` | the Linux package as an AppImage: one file, nothing to unpack. `BB_APPIMAGE_BUILD=1` builds it first, and `BB_MARCH` says what to compile for |
+| `tools/package_appimage_steamdeck.sh [INPUT] [OUTDIR]` | the same with the Steam Deck's settings, built for the Deck's CPU (`-march=znver2`) |
 | `tools/package_plugins.sh` | the official plugins with their signatures |
 | `tools/package_playtest.sh` | tester kits for a playtest on a dev server, built by hand |
+
+The AppImage scripts pack a tarball (`package_linux.sh`'s) or a bbhost binary,
+and fetch `appimagetool` and the AppImage runtime unless `APPIMAGETOOL` and
+`APPIMAGETOOL_RUNTIME` name ones already here, so a machine with no network
+needs those two. An AppImage is mounted read-only, so its `AppRun` keeps the
+session's log and an F12 frame dump under `~/.local/share/bbhost` instead of
+beside the binary. Running one needs FUSE: without it (or without
+`libfuse.so.2`, which a Deck and Steam's runtime are both known to be missing)
+the runtime unpacks itself instead with `--appimage-extract-and-run`.
 
 The release workflow (`.github/workflows/release.yml`) builds the Windows,
 Linux and Steam Deck packages from a `v*` tag, signs `SHA256SUMS` and the
