@@ -3359,30 +3359,35 @@ void textures_before_submit() {
     textures_return_from_host_locked();
 }
 
-// BBHOST_VRAM_EVICT_S=<s> (20; 0: never, as before; on with the reserve):
-// when video memory is down to the reserve - the image heap may not grow, so
-// a new texture would go to host memory - and the heap's blocks have less
-// than 256 MiB free for the textures to come, textures no bind has looked up
-// for <s> seconds go, up to that room and 256 MiB a second: those made ahead
-// at their resource's creation and never bound first, then the oldest. The
-// next bind makes one again from the guest memory that holds its texels.
-// Never one a shader or a copy wrote (its image holds what guest memory does
-// not). On a 6 GB card the made-ahead textures alone were 0.16-0.59 GiB.
+// BBHOST_VRAM_EVICT_S=<s> (0: never; on with the reserve): when video memory
+// is down to the reserve - the image heap may not grow, so a new texture would
+// go to host memory - and the heap's blocks have less than 256 MiB free for
+// the textures to come, textures no bind has looked up for <s> seconds go, up
+// to that room and 256 MiB a second: those made ahead at their resource's
+// creation and never bound first, then the oldest. The next bind makes one
+// again from the guest memory that holds its texels. Never one a shader or a
+// copy wrote (its image holds what guest memory does not). On a 6 GB card the
+// made-ahead textures alone were 0.16-0.59 GiB.
 //
-// bbport (VRAM cleanup): BB_VRAM_IDLE_SECONDS (30) is the idle a cold texture
-// needs, BB_VRAM_PRESSURE_PERCENT (85) the share of the driver's budget the
-// sweep is measured against, and above 90% of the budget the idle drops to
-// 10 s - a card past 90% fills faster than a 30 s sweep keeps up with, while
-// one merely past 85% can give a texture another half minute. The reserve
-// trigger below stays bbhost's (which a 512 MiB reserve meets near 90%).
+// bbport (VRAM cleanup): BB_VRAM_IDLE_SECONDS is the idle a cold texture needs
+// and takes precedence over BBHOST_VRAM_EVICT_S; with neither set the idle is
+// 30 s (bbhost's own default was 20 s). BB_VRAM_PRESSURE_PERCENT (85; 0 off)
+// is the share of the driver's budget the sweep is measured against, and above
+// 90% of the budget the idle drops to 10 s - a card past 90% fills faster than
+// a 30 s sweep keeps up with, while one merely past 85% can give a texture
+// another half minute. The percentage line is a second trigger: the reserve
+// one below stays bbhost's (which a 512 MiB reserve meets near 90%), and the
+// whole sweep - both triggers - needs a reserve to run at all.
 //
 // bbport (GPU hang guard): BB_GC_RECENT_FRAMES (48) and
 // BB_IMAGE_FREE_DELAY_FRAMES (32) are the flips after a texture's last use (or
 // deletion) it may be freed in. A draw may still read a texture the frame that
 // used it recorded, and a deleted image's Vulkan objects outlive its
-// unregistration; with either count unmet the sweep leaves it. Frames are the
-// GPU's own timeline, so a long frame (a hitch, a load) cannot age a texture
-// out from under a submission still reading it.
+// unregistration; with either count unmet the sweep leaves it. Both are on by
+// default and share one floor (the larger of the two), so 0 in one alone does
+// not switch the guard off; 0 in both is bbhost's behavior without it. Frames
+// are the GPU's own timeline, so a long frame (a hitch, a load) cannot age a
+// texture out from under a submission still reading it.
 std::uint64_t gc_recent_frames() {
     static const std::uint64_t n = [] {
         const char* e = std::getenv("BB_GC_RECENT_FRAMES");
@@ -3423,7 +3428,9 @@ void evict_cold_surfaces_locked() {
     if (now - last_ms < 1000) return;
     last_ms = now;
     // bbport (VRAM cleanup): the idle, shortened to 10 s above 90% of the
-    // driver's budget.
+    // driver's budget. BB_VRAM_PRESSURE_PERCENT=0 is the port's off (as in
+    // BloodBorneButPc), so the percentage line is only one of the sweep's two
+    // triggers - the reserve below stands on its own.
     static const unsigned pressure_pct = [] {
         const char* e = std::getenv("BB_VRAM_PRESSURE_PERCENT");
         return e && *e ? static_cast<unsigned>(std::strtoul(e, nullptr, 10)) : 85u;
@@ -3440,7 +3447,7 @@ void evict_cold_surfaces_locked() {
     constexpr std::uint64_t kWant = 256ull << 20;
     const std::uint64_t free_in_blocks = image_heap_vram_free_locked();
     const bool at_reserve = vram_within_reserve(kWant);
-    const bool pressured = budget && used_pct >= pressure_pct;
+    const bool pressured = budget && pressure_pct && used_pct >= pressure_pct;
     if (!at_reserve && !pressured) return;
     if (free_in_blocks >= kWant && !pressured) return;
     const std::uint64_t target = free_in_blocks >= kWant ? kWant : kWant - free_in_blocks;
