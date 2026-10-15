@@ -57,14 +57,18 @@ constexpr std::uint64_t kDmemBaseSize = 0x180000000ull;
 constexpr std::uint64_t kDmemMaxSize = 0x1f0000000ull;
 // bbport (BB_DMEM_MB): the direct memory the game is told it has, in MiB. The
 // stock 6 GiB (kDmemBaseSize); BB_DMEM_MB names another (the port's larger pool
-// for a scene above 1080p is 9152 MiB), clamped to what the window reserved for
-// it holds (kDmemMaxSize, 7.75 GiB). Fixed once the backing exists.
+// for a scene above 1080p is 9152 MiB), clamped to [kDmemBaseSize, kDmemMaxSize]
+// - the same window hle_kernel_set_dmem_size() grows the pool in, so the switch
+// only ever raises it. Below the stock size the game's own heaps no longer fit
+// (which is why that function clamps there too), and the pool is fixed once the
+// backing exists.
 std::uint64_t g_dmem_size = [] {
     const char* e = std::getenv("BB_DMEM_MB");
     if (!e || !*e) return kDmemBaseSize;
     const std::uint64_t mib = std::strtoull(e, nullptr, 10);
-    if (!mib) return kDmemBaseSize;
-    return std::min(kDmemMaxSize, std::max<std::uint64_t>(512ull << 20, mib << 20));
+    if (mib <= (kDmemBaseSize >> 20)) return kDmemBaseSize;
+    if (mib >= (kDmemMaxSize >> 20)) return kDmemMaxSize;
+    return mib << 20;
 }();
 // Gnm addresses are 40-bit. Place CPU dmem below 2^40 so (va >> 8) << 8 is identity.
 constexpr std::uint64_t kDmemVaBase = 0x100000000ull;
