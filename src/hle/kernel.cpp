@@ -55,7 +55,17 @@ std::mutex g_dmem_mu;
 // window reserved for it holds - it ends below the image's fallback base.
 constexpr std::uint64_t kDmemBaseSize = 0x180000000ull;
 constexpr std::uint64_t kDmemMaxSize = 0x1f0000000ull;
-std::uint64_t g_dmem_size = kDmemBaseSize;  // fixed once the backing exists
+// bbport (BB_DMEM_MB): the direct memory the game is told it has, in MiB. The
+// stock 6 GiB (kDmemBaseSize); BB_DMEM_MB names another (the port's larger pool
+// for a scene above 1080p is 9152 MiB), clamped to what the window reserved for
+// it holds (kDmemMaxSize, 7.75 GiB). Fixed once the backing exists.
+std::uint64_t g_dmem_size = [] {
+    const char* e = std::getenv("BB_DMEM_MB");
+    if (!e || !*e) return kDmemBaseSize;
+    const std::uint64_t mib = std::strtoull(e, nullptr, 10);
+    if (!mib) return kDmemBaseSize;
+    return std::min(kDmemMaxSize, std::max<std::uint64_t>(512ull << 20, mib << 20));
+}();
 // Gnm addresses are 40-bit. Place CPU dmem below 2^40 so (va >> 8) << 8 is identity.
 constexpr std::uint64_t kDmemVaBase = 0x100000000ull;
 // GX also fills command buffers at this window + phys when phys fits in 4 GiB.
