@@ -4573,6 +4573,11 @@ void vram_reserve_init() {
 
 std::uint64_t vram_reserve_bytes() { return g_vram_reserve; }
 
+// bbport (VRAM cleanup): the driver's budget for the heap the textures are
+// placed in (g.local_budget; the heap's size when the driver offers no budget),
+// so the cold-texture sweep can measure pressure as a share of it.
+std::uint64_t vram_budget_bytes() { return g.local_budget; }
+
 bool vram_within_reserve(std::uint64_t more) {
     return g_vram_reserve && vram_headroom() < static_cast<std::int64_t>(g_vram_reserve + more);
 }

@@ -555,6 +555,10 @@ struct Surface {
     // view memos answer stamps it once a recording, from a coarse clock):
     // what the cold-texture eviction ranks by (evict_cold_surfaces_locked).
     std::uint64_t used_ms = 0;
+    // bbport (GPU hang guard, BB_GC_RECENT_FRAMES): the video flip at that last
+    // use, so the collector can leave a texture the last frames used alone in
+    // frames - the GPU's own timeline - not only in milliseconds.
+    std::uint64_t used_flip = 0;
     // The last upload's untile and hashes, while the prep pool still has them
     // (TexturePrep); settle_prep() takes the hashes.
     std::shared_ptr<struct TexturePrep> prep;
@@ -1716,6 +1720,7 @@ void refresh_surface_locked(Surface& sf) {
         sf.refreshed_serial = stamp;
     }
     sf.used_ms = g_coarse_ms;
+    sf.used_flip = hle_video_flip_count();
     // A write the watch saw: upload now, whatever the hash schedule below
     // says. That schedule backs off to 2 s for a surface that sits still, so
     // a glyph drawn into a menu atlas that had been idle took up to that long
@@ -2592,7 +2597,10 @@ VkImageView texture_view_uncached(const std::uint32_t* w, bool storage, bool& di
     }
     Surface& sf = it->second;
     g_last_view_surface = &sf;
-    if (!t_force_async || !sf.used_ms) sf.used_ms = now_ms();
+    if (!t_force_async || !sf.used_ms) {
+        sf.used_ms = now_ms();
+        sf.used_flip = hle_video_flip_count();
+    }
     if (sf.ahead && !sf.ahead_used && !t_force_async) {
         sf.ahead_used = true;
         g_ahead_used.fetch_add(1, std::memory_order_relaxed);
@@ -3360,23 +3368,82 @@ void textures_before_submit() {
 // next bind makes one again from the guest memory that holds its texels.
 // Never one a shader or a copy wrote (its image holds what guest memory does
 // not). On a 6 GB card the made-ahead textures alone were 0.16-0.59 GiB.
+//
+// bbport (VRAM cleanup): BB_VRAM_IDLE_SECONDS (30) is the idle a cold texture
+// needs, BB_VRAM_PRESSURE_PERCENT (85) the share of the driver's budget the
+// sweep is measured against, and above 90% of the budget the idle drops to
+// 10 s - a card past 90% fills faster than a 30 s sweep keeps up with, while
+// one merely past 85% can give a texture another half minute. The reserve
+// trigger below stays bbhost's (which a 512 MiB reserve meets near 90%).
+//
+// bbport (GPU hang guard): BB_GC_RECENT_FRAMES (48) and
+// BB_IMAGE_FREE_DELAY_FRAMES (32) are the flips after a texture's last use (or
+// deletion) it may be freed in. A draw may still read a texture the frame that
+// used it recorded, and a deleted image's Vulkan objects outlive its
+// unregistration; with either count unmet the sweep leaves it. Frames are the
+// GPU's own timeline, so a long frame (a hitch, a load) cannot age a texture
+// out from under a submission still reading it.
+std::uint64_t gc_recent_frames() {
+    static const std::uint64_t n = [] {
+        const char* e = std::getenv("BB_GC_RECENT_FRAMES");
+        return e && *e ? std::strtoull(e, nullptr, 10) : 48ull;
+    }();
+    return n;
+}
+std::uint64_t image_free_delay_frames() {
+    static const std::uint64_t n = [] {
+        const char* e = std::getenv("BB_IMAGE_FREE_DELAY_FRAMES");
+        return e && *e ? std::strtoull(e, nullptr, 10) : 32ull;
+    }();
+    return n;
+}
+bool surface_in_recent_use(const Surface& sf) {
+    const std::uint64_t frames = std::max(gc_recent_frames(), image_free_delay_frames());
+    if (!frames || !sf.used_flip) return false;
+    const std::uint64_t flip = hle_video_flip_count();
+    return flip >= sf.used_flip && flip - sf.used_flip < frames;
+}
+
 std::uint64_t g_evicted_surfaces = 0, g_evicted_bytes = 0, g_evicted_ahead = 0;
 
 void evict_cold_surfaces_locked() {
-    static const std::uint64_t idle_ms = [] {
+    static const std::uint64_t idle_floor_ms = [] {
+        const char* i = std::getenv("BB_VRAM_IDLE_SECONDS");
+        if (i && *i) return std::strtoull(i, nullptr, 10) * 1000;
         const char* e = std::getenv("BBHOST_VRAM_EVICT_S");
-        return (e && *e ? std::strtoull(e, nullptr, 10) : 20ull) * 1000;
+        return (e && *e ? std::strtoull(e, nullptr, 10) : 30ull) * 1000;
     }();
-    if (!idle_ms || !vram_reserve_bytes()) return;
+    static const bool evict_off = [] {
+        const char* e = std::getenv("BBHOST_VRAM_EVICT_S");
+        return e && e[0] == '0' && e[1] == '\0';
+    }();
+    if (evict_off || !idle_floor_ms || !vram_reserve_bytes()) return;
     static std::uint64_t last_ms = 0;
     const std::uint64_t now = now_ms();
     if (now - last_ms < 1000) return;
     last_ms = now;
+    // bbport (VRAM cleanup): the idle, shortened to 10 s above 90% of the
+    // driver's budget.
+    static const unsigned pressure_pct = [] {
+        const char* e = std::getenv("BB_VRAM_PRESSURE_PERCENT");
+        return e && *e ? static_cast<unsigned>(std::strtoul(e, nullptr, 10)) : 85u;
+    }();
+    std::uint64_t idle_ms = idle_floor_ms;
+    const std::uint64_t budget = vram_budget_bytes();
+    unsigned used_pct = 0;
+    if (budget) {
+        const std::int64_t head = vram_headroom();
+        const std::uint64_t used = head <= 0 ? budget : budget - std::min(budget, static_cast<std::uint64_t>(head));
+        used_pct = static_cast<unsigned>(100ull * used / budget);
+        if (used_pct >= 90u) idle_ms = std::min<std::uint64_t>(idle_ms, 10ull * 1000);
+    }
     constexpr std::uint64_t kWant = 256ull << 20;
-    if (!vram_within_reserve(kWant)) return;
     const std::uint64_t free_in_blocks = image_heap_vram_free_locked();
-    if (free_in_blocks >= kWant) return;
-    const std::uint64_t target = kWant - free_in_blocks;
+    const bool at_reserve = vram_within_reserve(kWant);
+    const bool pressured = budget && used_pct >= pressure_pct;
+    if (!at_reserve && !pressured) return;
+    if (free_in_blocks >= kWant && !pressured) return;
+    const std::uint64_t target = free_in_blocks >= kWant ? kWant : kWant - free_in_blocks;
     struct Cold {
         bool used;  // false: made ahead and never bound - these go first
         std::uint64_t used_ms, base;
@@ -3385,6 +3452,8 @@ void evict_cold_surfaces_locked() {
     std::vector<Cold> cold;
     for (const auto& [base, sf] : g_surfaces) {
         if (!sf.image || sf.failed || sf.gpu_written || sf.copied_mips || surface_in_host(sf)) continue;
+        // bbport (GPU hang guard): a texture the last frames used is never freed.
+        if (surface_in_recent_use(sf)) continue;
         if (!sf.used_ms || now - sf.used_ms < idle_ms) continue;
         cold.push_back({!(sf.ahead && !sf.ahead_used), sf.used_ms, base});
     }
@@ -3474,6 +3543,12 @@ ReuseRetired textures_retire_reused_locked(std::uint64_t now, std::uint64_t idle
         if ((++k & 15) == 0 && std::chrono::steady_clock::now() >= deadline) break;
         Surface& sf = it->second;
         const std::size_t span = std::max<std::size_t>(sf.total_src, 1);
+        // bbport (GPU hang guard): as in the cold-texture sweep, a surface the
+        // last frames used is left alone.
+        if (surface_in_recent_use(sf)) {
+            ++it;
+            continue;
+        }
         if (!sf.image || !sf.gpu_written || sf.written_ms + idle_ms > now || gx_resource_at(sf.base, span, nullptr) ||
             (!gx_resource_newer_overlapping(sf.base, span, sf.written_flip) &&
              !render_target_newer_overlapping_locked(sf.base, span, sf.written_flip, nullptr))) {

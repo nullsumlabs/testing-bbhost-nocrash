@@ -623,6 +623,10 @@ std::int64_t vram_headroom();
 // textures take no new video memory out of it, the memory keeper makes no
 // spare in it, and the untile scratch takes no new chunk there.
 std::uint64_t vram_reserve_bytes();
+// bbport (VRAM cleanup): the driver's budget for the device-local heap, so the
+// cold-texture sweep can measure pressure as a share of it
+// (BB_VRAM_PRESSURE_PERCENT).
+std::uint64_t vram_budget_bytes();
 // Whether video memory is down to the reserve (headroom under reserve +
 // `more` bytes); false when the reserve is off.
 bool vram_within_reserve(std::uint64_t more = 0);
